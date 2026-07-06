@@ -1,0 +1,36 @@
+#cloud-config
+# In-guest first-boot bootstrap for the agent VM. Runs once via cloud-init
+# (bundled in the images:debian/13/cloud image). Everything security-
+# critical (guard/hook.py, settings.json, your SSH key) is pushed
+# separately by provision-agent-vm.sh via `incus file push` after boot --
+# this file only handles package installs and the default `debian` user's
+# group membership.
+#
+# Baseline packages are deliberately minimal/generic. If your own workflow
+# needs more (e.g. a secrets tool like sops, a database client, a specific
+# language toolchain), add it to `packages` or `runcmd` below -- this file
+# is meant to be edited per use case.
+
+package_update: true
+packages:
+  - git
+  - openssh-server
+  - build-essential
+  - curl
+  - ca-certificates
+  - gh
+  - incus-client
+
+groups:
+  - sudo
+
+runcmd:
+  # Node 22+ is required by @anthropic-ai/claude-code; Debian 13's own
+  # repo only ships Node 20, so pull NodeSource's Node 22 repo.
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  - npm install -g @anthropic-ai/claude-code
+  - usermod -aG sudo debian
+  - [su, -, debian, -c, "curl -LsSf https://astral.sh/uv/install.sh | sh"]
+  - systemctl enable --now ssh
+  - touch /var/lib/cloud/agent-vm-bootstrap-done
