@@ -140,6 +140,67 @@ incus file push "$SCRIPT_DIR/files/claude-settings.json" "$VM_NAME/home/$GUEST_U
 incus exec "$VM_NAME" -- chmod 755 "/home/$GUEST_USER/.claude/guard/hook.py"
 incus exec "$VM_NAME" -- chown -R "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.claude"
 
+# ---- 8b. permanent bypassPermissions wrapper (idempotent) ----------------
+# permissions.defaultMode in settings.json (set above) is unreliable for
+# *interactive* sessions -- confirmed live: correct at both user and
+# project scope, VM restarted fresh 3x, still prompted. Works fine for
+# non-interactive -p invocations, not interactive ones. The CLI flag
+# --permission-mode bypassPermissions is what actually holds (confirmed
+# live originally). A PATH-shadowing wrapper in ~/.local/bin (ahead of
+# /usr/bin in PATH) applies it regardless of how claude gets launched --
+# interactive shell, VS Code spawning it, anything doing a PATH lookup --
+# unlike a .bashrc alias, which only covers interactive shell invocations.
+if incus exec "$VM_NAME" -- test -f "/home/$GUEST_USER/.local/bin/claude" 2>/dev/null; then
+  echo "-- bypassPermissions wrapper already present, skipping --"
+else
+  echo "-- installing PATH-shadowing wrapper for permanent bypassPermissions --"
+  WRAPPER_TMP="$(mktemp)"
+  {
+    echo '#!/bin/bash'
+    echo 'exec /usr/bin/claude --permission-mode bypassPermissions "$@"'
+  } > "$WRAPPER_TMP"
+  incus exec "$VM_NAME" -- mkdir -p "/home/$GUEST_USER/.local/bin"
+  incus file push "$WRAPPER_TMP" "$VM_NAME/home/$GUEST_USER/.local/bin/claude"
+  incus exec "$VM_NAME" -- chmod +x "/home/$GUEST_USER/.local/bin/claude"
+  incus exec "$VM_NAME" -- chown "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.local/bin/claude"
+  rm -f "$WRAPPER_TMP"
+fi
+
+# ---- 8c. VS Code extension bypassPermissions (idempotent) ----------------
+# The Claude Code VS Code extension spawns its own bundled binary directly
+# (~/.vscode-server/extensions/anthropic.claude-code-*/resources/native-
+# binary/claude, confirmed live via ps aux) and hardcodes
+# --permission-mode acceptEdits as a launch arg -- beats settings.json and
+# the PATH wrapper above entirely, since it never goes through PATH.
+# claudeCode.initialPermissionMode in VS Code's *remote-machine-scoped*
+# settings.json overrides that hardcoded flag. This is genuinely VM-side
+# (~/.vscode-server/data/Machine/settings.json), not client-side -- easy
+# to assume otherwise since the UI calls it "Remote [SSH: hostname]"
+# scope, but the file lives on the VM, confirmed live. Still requires a
+# one-time manual step this script can't do: enabling "Allow dangerously
+# skip permissions" in the extension's settings panel (client-side UI
+# toggle, no equivalent file to script).
+VSCODE_MACHINE_SETTINGS="/home/$GUEST_USER/.vscode-server/data/Machine/settings.json"
+if incus exec "$VM_NAME" -- test -f "$VSCODE_MACHINE_SETTINGS" 2>/dev/null; then
+  echo "-- VS Code machine settings.json already exists, leaving as-is --"
+  echo "   (verify it has claudeCode.initialPermissionMode: bypassPermissions)"
+else
+  echo "-- writing VS Code machine-scoped claudeCode.initialPermissionMode --"
+  VSCODE_SETTINGS_TMP="$(mktemp)"
+  {
+    echo '{'
+    echo '  "claudeCode.initialPermissionMode": "bypassPermissions"'
+    echo '}'
+  } > "$VSCODE_SETTINGS_TMP"
+  incus exec "$VM_NAME" -- mkdir -p "/home/$GUEST_USER/.vscode-server/data/Machine"
+  incus file push "$VSCODE_SETTINGS_TMP" "$VM_NAME$VSCODE_MACHINE_SETTINGS"
+  incus exec "$VM_NAME" -- chown "$GUEST_USER:$GUEST_USER" "$VSCODE_MACHINE_SETTINGS"
+  rm -f "$VSCODE_SETTINGS_TMP"
+  echo "   Still needed once, manually in VS Code: enable 'Allow dangerously"
+  echo "   skip permissions' in the Claude Code extension settings panel,"
+  echo "   then reload window."
+fi
+
 # ---- 9. land interactive shells in the workspace by default (idempotent) -
 # Claude Code's session/project history is keyed by the absolute cwd it was
 # started from -- landing anywhere else (e.g. $HOME over a bare SSH login)

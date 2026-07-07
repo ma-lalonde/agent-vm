@@ -89,6 +89,38 @@ ssh -i ~/.ssh/agent_vm_ed25519 debian@<vm-ip>   # incus list agent-vm
 Or point VS Code's Remote-SSH extension at the same host/key, then run
 `claude` in its integrated terminal.
 
+**VS Code Remote-SSH + bypassPermissions gotcha**: the Claude Code VS Code
+extension does NOT use the `claude` on PATH or read `~/.claude/settings.json`'s
+`permissions.defaultMode` the way a terminal session does. It spawns its own
+bundled binary directly (`~/.vscode-server/extensions/anthropic.claude-code-*/
+resources/native-binary/claude`, confirmed live via `ps aux`) and hardcodes
+`--permission-mode acceptEdits` as a launch argument, which beats every
+settings.json layer (user, project, local) and any PATH-based wrapper. If
+Claude keeps prompting for approval inside VS Code despite `bypassPermissions`
+being set everywhere else, this is why. Fix:
+
+1. Extension settings panel: enable **"Allow dangerously skip permissions"**
+   (prerequisite -- without it, step 2 does nothing; this one toggle is
+   client-side UI state with no equivalent file, so it can't be scripted).
+2. `claudeCode.initialPermissionMode: "bypassPermissions"` in VS Code's
+   **remote-machine-scoped** settings. Despite the UI calling this scope
+   "Remote [SSH: hostname]" (which reads as client-side) the file is
+   actually **on the VM**, at `~/.vscode-server/data/Machine/settings.json`
+   -- confirmed live. `provision-agent-vm.sh` step 8c writes this file
+   automatically; only step 1's toggle needs doing by hand.
+3. Reload window (kills and respawns the extension's claude processes with
+   the corrected flag).
+
+Plain `ssh`/terminal sessions don't have this problem the same way, but
+`permissions.defaultMode` in settings.json was found unreliable for
+*interactive* sessions there too (confirmed live: correct at both scopes,
+VM restarted fresh 3x, still prompted -- works fine for non-interactive `-p`
+invocations, not interactive ones). `provision-agent-vm.sh` step 8b installs
+a `~/.local/bin/claude` wrapper (ahead of `/usr/bin/claude` in PATH) that
+always launches with `--permission-mode bypassPermissions` explicitly, which
+is what actually holds for terminal/SSH use. That wrapper does not reach the
+VS Code extension's spawned process, hence steps 1-3 above.
+
 If you're using the remote-API feature, switch to the host remote before
 relying on it (the provisioning script already sets it as default, so this
 is normally a no-op — only needed if you've since switched to `local:`):
