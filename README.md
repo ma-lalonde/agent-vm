@@ -86,8 +86,50 @@ Connect:
 ssh -i ~/.ssh/agent_vm_ed25519 debian@<vm-ip>   # incus list agent-vm
 ```
 
-Or point VS Code's Remote-SSH extension at the same host/key, then run
-`claude` in its integrated terminal.
+Better: add a named alias to `~/.ssh/config` rather than connecting by raw
+IP, since Incus VMs get a DHCP lease that can change (confirmed live: this
+VM has had three different IPs across one session, each requiring the fix
+below to be redone if keyed by IP instead of a stable name):
+
+```
+Host agent-vm
+  HostName <vm-ip>
+  User debian
+  IdentityFile ~/.ssh/agent_vm_ed25519
+  IdentitiesOnly yes
+```
+
+`IdentitiesOnly yes` matters if you have other keys loaded in `ssh-agent`
+(confirmed live: with 4 unrelated keys loaded, SSH offered all of them
+before falling through to `IdentityFile`, exhausting `MaxAuthTries`
+against the wrong keys and dropping to a password prompt -- which can
+never succeed anyway, since cloud-init never sets a password for the
+`debian` user). Without this, both plain `ssh` and VS Code can hit the
+same failure depending on what else happens to be loaded in your agent
+that session.
+
+Or point VS Code's Remote-SSH extension at the same alias (or host/key),
+then run `claude` in its integrated terminal.
+
+**VS Code Remote-SSH + "Platform: windows" gotcha**: VS Code's Remote-SSH
+extension has a known platform auto-detection bug
+([microsoft/vscode-remote-release#6319](https://github.com/microsoft/vscode-remote-release/issues/6319))
+where it sometimes misdetects a Linux remote as Windows and bootstraps
+with PowerShell instead of bash (`-bash: line 3: powershell: command not
+found` in the Remote-SSH output log), causing the connection to hang and
+eventually time out — even though the underlying SSH auth succeeds fine
+(confirmed live: `Authenticated ... using "publickey"` and a real shell
+banner both show in the log before the failure). Plain `ssh`/terminal
+connections are unaffected; this is specific to the Remote-SSH extension's
+own bootstrap logic. Fix: add the documented override to VS Code's user
+`settings.json`, keyed by whatever host string you connect with (the
+`agent-vm` alias above, if you're using it):
+
+```json
+"remote.SSH.remotePlatform": {
+  "agent-vm": "linux"
+}
+```
 
 **VS Code Remote-SSH + bypassPermissions gotcha**: the Claude Code VS Code
 extension does NOT use the `claude` on PATH or read `~/.claude/settings.json`'s
@@ -133,6 +175,21 @@ Baseline packages installed inside the VM are deliberately minimal (git,
 ssh, build tools, node, uv, gh, incus-client, Claude Code CLI). Add
 whatever your own workflow needs to `cloud-init.yaml` — a secrets tool, a
 database client, a specific language toolchain, etc.
+
+**Gotcha, hit live**: if the agent (or you) installs another language
+toolchain later and follows its suggested `~/.profile`/`~/.bashrc` PATH
+line verbatim, check it *appends* (`PATH="/new/bin:$PATH"`) rather than
+*overwrites* (`PATH="/new/bin"`). A Go install did the latter here at some
+point, silently wiping `/usr/bin`, `/bin`, and `~/.local/bin` from every
+subsequent login shell's PATH -- including the host's own `incus exec ...
+su - debian -c "..."` calls in `provision-agent-vm.sh`, which is why a
+mid-session reprovision failed with `incus: command not found` *inside*
+the VM despite `incus-client` being installed the whole time. Same root
+cause silently broke the VS Code extension's environment too, since its
+spawned processes source the same broken profile. Fixed by editing the
+overwriting line to append instead; doesn't self-heal, so check for this
+pattern in `~/.profile`/`~/.bashrc` first if `command not found` errors
+show up for something that was working before.
 
 ## Optional add-ons
 

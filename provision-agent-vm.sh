@@ -330,8 +330,14 @@ if [ "${INSTALL_TOKEN_SAVIOR:-0}" = "1" ]; then
     echo "   registration if the repo list has changed since it was added) --"
   else
     echo "-- registering token-savior as a user-scoped MCP server ($(echo "$WORKSPACE_ROOTS_LIST" | tr ',' '\n' | wc -l) roots) --"
+    # Absolute path, not bare `token-savior` -- the VS Code extension spawns
+    # its own bundled binary with a stripped-down PATH (confirmed live:
+    # missing /usr/bin, /bin, and ~/.local/bin entirely, unlike a login
+    # shell via `su -`), so a PATH-dependent command silently fails to
+    # start after a VM restart even though it worked fine beforehand in a
+    # normal shell.
     incus exec "$VM_NAME" -- su - "$GUEST_USER" -c \
-      "claude mcp add token-savior -s user -e WORKSPACE_ROOTS=$WORKSPACE_ROOTS_LIST -e TOKEN_SAVIOR_CLIENT=claude-code -- token-savior"
+      "claude mcp add token-savior -s user -e WORKSPACE_ROOTS=$WORKSPACE_ROOTS_LIST -e TOKEN_SAVIOR_CLIENT=claude-code -- /home/$GUEST_USER/.local/bin/token-savior"
   fi
 fi
 
