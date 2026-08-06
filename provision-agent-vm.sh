@@ -288,14 +288,21 @@ incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "incus remote switch $REMOTE_NAME
 # either host or guest. Persists to the guest's own gh/git config, so this
 # holds regardless of shell type (interactive or not) -- unlike an env var
 # that would only reach interactive shells via .bashrc.
+#
+# Applied unconditionally rather than behind a "already authenticated?"
+# check. The obvious guard, `gh auth status`, exits 0 whenever a token is
+# STORED -- including one GitHub now rejects: it prints "The token in
+# hosts.yml is invalid" and still returns 0 (confirmed live, alongside
+# `gh api user` returning 401 Bad credentials). A presence check therefore
+# can never replace an expired token: every re-run printed "already
+# authenticated, skipping" and left the dead token in place, so rotating
+# GH_TOKEN in .env and re-running this script had no effect at all.
+# Writing the token .env already declares is idempotent by itself, so
+# there is nothing left for a guard to save.
 if [ -n "${GH_TOKEN:-}" ]; then
-  if incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "gh auth status" >/dev/null 2>&1; then
-    echo "-- gh already authenticated in the VM, skipping --"
-  else
-    echo "-- authenticating gh (and git, via setup-git) with the provided token --"
-    incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "gh auth login --hostname github.com --with-token" <<< "$GH_TOKEN"
-    incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "gh auth setup-git"
-  fi
+  echo "-- authenticating gh (and git, via setup-git) with the provided token --"
+  incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "gh auth login --hostname github.com --with-token" <<< "$GH_TOKEN"
+  incus exec "$VM_NAME" -- su - "$GUEST_USER" -c "gh auth setup-git"
 fi
 
 # ---- 12. optional token-savior MCP (idempotent) ---------------------------
