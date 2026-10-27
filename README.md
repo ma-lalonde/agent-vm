@@ -77,7 +77,8 @@ The script refuses to run without a `.env` present, rather than silently
 falling back to built-in defaults — see `.env.example` for every
 configurable variable (`VM_NAME`, `VM_CPU`, `VM_MEMORY`, `VM_DISK`,
 `WORKSPACE_SRC`, `WORKSPACE_DEST`, `SSH_KEY_PATH`, `REMOTE_NAME`, `GH_TOKEN`,
-`INSTALL_TOKEN_SAVIOR`, `INSTALL_CAVEMAN`) and what each one does. Safe to
+`INSTALL_TOKEN_SAVIOR`, `INSTALL_CAVEMAN`, `INSTALL_QMD_REMOTE`,
+`QMD_HTTP_PORT`, `INSTALL_REMOTE_CONTROL`) and what each one does. Safe to
 re-run afterward — every step checks for existing state first.
 
 Connect:
@@ -172,7 +173,7 @@ incus remote switch host
 ```
 
 Baseline packages installed inside the VM are deliberately minimal (git,
-ssh, build tools, node, uv, gh, incus-client, Claude Code CLI). Add
+ssh, build tools, node, uv, gh, incus-client, tmux, Claude Code CLI). Add
 whatever your own workflow needs to `cloud-init.yaml` — a secrets tool, a
 database client, a specific language toolchain, etc.
 
@@ -195,7 +196,7 @@ show up for something that was working before.
 
 All off by default in `.env.example` — personal preferences, not defaults
 for anyone else reproducing this setup. Enable by setting to `1` in `.env`
-and re-running the script (steps 12-14 in `provision-agent-vm.sh`, each
+and re-running the script (steps 12-15 in `provision-agent-vm.sh`, each
 gated on its own flag and checked for existing state before acting).
 
 ### `INSTALL_TOKEN_SAVIOR` — [Mibayy/token-savior](https://github.com/Mibayy/token-savior)
@@ -275,6 +276,33 @@ pointing at an address the VM can't reach. Re-check
 [github.com/tobi/qmd](https://github.com/tobi/qmd) for a fix before
 re-enabling.
 
+### `INSTALL_REMOTE_CONTROL`: sessions from claude.ai/code and the Claude app
+
+Step 15 installs a systemd user unit, `claude-rc.service`, that keeps
+`claude remote-control` running in a detached tmux session (socket `rc`)
+in `$WORKSPACE_DEST`, with `bypassPermissions` and at most 3 concurrent
+sessions. Linger starts it at boot without a login; systemd restarts it
+if it exits.
+
+- **Use**: open [claude.ai/code](https://claude.ai/code) or the Claude app
+  (Code), pick a session named after the VM's hostname or start a new one.
+  Sessions keep running when you close the browser or app.
+- **First start**: run `claude` once in `$WORKSPACE_DEST` and accept the
+  workspace trust dialog; until then the server exits with `Workspace not
+  trusted` and systemd retries every 30 seconds. Then attach with
+  `tmux -L rc attach -t rc`, accept the one-time Remote Control prompt and
+  detach with `Ctrl-b d`.
+- **Manage**: `systemctl --user status|restart|stop claude-rc` inside the VM.
+- **Login**: needs a claude.ai login in the VM (`claude`, then `/login`).
+  API keys and `claude setup-token` tokens cannot start Remote Control.
+- **Access**: anyone signed in to your claude.ai account can drive these
+  sessions in `bypassPermissions` mode; the guard hook still applies.
+
+Claude Desktop needs none of this: its SSH environment (host `agent-vm`
+from your `~/.ssh/config`) runs sessions on the VM under a helper it
+installs, and needs only the SSH server with SFTP that `cloud-init.yaml`
+already provides.
+
 ### Adding your own
 
 Same pattern for anything else you want: install inside the VM via
@@ -290,7 +318,7 @@ run unattended.
 | --- | --- |
 | `.env.example` | Every configurable variable, documented. Copy to `.env` and edit — the script won't run without it. |
 | `provision-agent-vm.sh` | Host-side: creates the VM, shares a directory in, optionally wires the Incus remote API. Idempotent. |
-| `cloud-init.yaml` | In-guest first-boot: baseline packages (git, node, uv, gh, incus-client), SSH server, sudo group. Edit to add your own extras. |
+| `cloud-init.yaml` | In-guest first-boot: baseline packages (git, node, uv, gh, incus-client, tmux), SSH server, sudo group. Edit to add your own extras. |
 | `files/guard-hook.py` | The security hook — sudo/git-push/self-edit blocking. |
 | `files/claude-settings.json` | Wires the hook into Claude Code's `PreToolUse` events inside the VM. |
 | `cleanup-host.sh` | **Run manually, only after verifying the VM works.** Strips agent tooling from the bare host. |

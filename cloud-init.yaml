@@ -20,6 +20,7 @@ packages:
   - ca-certificates
   - gh
   - incus-client
+  - tmux
 
 groups:
   - sudo

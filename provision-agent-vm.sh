@@ -424,6 +424,49 @@ if [ "${INSTALL_QMD_REMOTE:-0}" = "1" ]; then
   fi
 fi
 
+# ---- 15. optional Remote Control server (idempotent) ----------------------
+# A systemd user unit keeps `claude remote-control` running in a detached
+# tmux session on its own socket (`rc`), restarting it if it exits; linger
+# starts the user manager at boot without a login. It calls /usr/bin/claude
+# directly: remote-control refuses global flags placed before the
+# subcommand, which is what the step 8b wrapper does, so the server takes
+# its own --permission-mode. Capacity 3: more parallel agents have hung
+# the virtiofs share.
+if [ "${INSTALL_REMOTE_CONTROL:-0}" = "1" ]; then
+  echo "-- installing the claude-rc user service (Remote Control in tmux) --"
+  RC_UNIT_DIR="/home/$GUEST_USER/.config/systemd/user"
+  RC_UNIT_TMP="$(mktemp)"
+  cat > "$RC_UNIT_TMP" <<EOF
+[Unit]
+Description=Claude Code Remote Control server (attach: tmux -L rc attach -t rc)
+
+[Service]
+Type=forking
+ExecStartPre=/bin/sh -c 'until mountpoint -q $WORKSPACE_DEST; do sleep 2; done'
+ExecStart=/usr/bin/tmux -L rc new-session -d -s rc -c $WORKSPACE_DEST /bin/bash -lc 'exec /usr/bin/claude remote-control --permission-mode bypassPermissions --capacity 3'
+ExecStop=/usr/bin/tmux -L rc kill-server
+Restart=always
+RestartSec=30
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
+EOF
+  incus exec "$VM_NAME" -- mkdir -p "$RC_UNIT_DIR"
+  incus file push "$RC_UNIT_TMP" "$VM_NAME$RC_UNIT_DIR/claude-rc.service"
+  incus exec "$VM_NAME" -- chown -R "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.config/systemd"
+  rm -f "$RC_UNIT_TMP"
+  incus exec "$VM_NAME" -- loginctl enable-linger "$GUEST_USER"
+  GUEST_UID="$(incus exec "$VM_NAME" -- id -u "$GUEST_USER")"
+  incus exec "$VM_NAME" -- systemctl start "user@$GUEST_UID.service"
+  incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" daemon-reload
+  incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" enable --now claude-rc.service
+  echo "   First start only, inside the VM: run 'claude' once in $WORKSPACE_DEST and"
+  echo "   accept the workspace trust dialog, then attach with"
+  echo "   'tmux -L rc attach -t rc', accept the Remote Control prompt and detach"
+  echo "   with Ctrl-b d."
+fi
+
 echo
 echo "== done =="
 echo "SSH in with:  ssh -i $SSH_KEY_PATH $GUEST_USER@$(incus list "$VM_NAME" -f csv -c 4 | cut -d' ' -f1)"
