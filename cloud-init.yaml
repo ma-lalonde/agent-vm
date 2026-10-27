@@ -26,12 +26,12 @@ groups:
   - sudo
 
 runcmd:
-  # Node 22+ is required by @anthropic-ai/claude-code; Debian 13's own
-  # repo only ships Node 20, so pull NodeSource's Node 22 repo.
+  # Node 22 for JavaScript tooling; Debian 13's own repo ships Node 20.
   - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   - apt-get install -y nodejs
-  - npm install -g @anthropic-ai/claude-code
   - usermod -aG sudo debian
+  # Native Claude Code: ~/.local/bin/claude, updates itself as the user.
+  - [su, -, debian, -c, "curl -fsSL https://claude.ai/install.sh | bash"]
   - [su, -, debian, -c, "curl -LsSf https://astral.sh/uv/install.sh | sh"]
   - systemctl enable --now ssh
   - touch /var/lib/cloud/agent-vm-bootstrap-done

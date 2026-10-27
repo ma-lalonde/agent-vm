@@ -41,6 +41,10 @@ groups). A real VM sidesteps both problems.
   resuming. VS Code's Remote-SSH *workspace folder* still needs one manual
   "Open Folder" to `$WORKSPACE_DEST` on first connect; it remembers it per
   host after that.
+- A daily cache sweep (`files/cache-sweep.sh`, systemd user timer at
+  05:00): no regenerable cache (Docker images and build cache, Go, npm, uv,
+  pip, pre-commit, scanner databases, anything else under `~/.cache`) keeps
+  anything older than 7 days. Docker volumes are never touched.
 
 ## What it deliberately doesn't do
 
@@ -138,7 +142,7 @@ extension does NOT use the `claude` on PATH or read `~/.claude/settings.json`'s
 bundled binary directly (`~/.vscode-server/extensions/anthropic.claude-code-*/
 resources/native-binary/claude`, confirmed live via `ps aux`) and hardcodes
 `--permission-mode acceptEdits` as a launch argument, which beats every
-settings.json layer (user, project, local) and any PATH-based wrapper. If
+settings.json layer (user, project, local). If
 Claude keeps prompting for approval inside VS Code despite `bypassPermissions`
 being set everywhere else, this is why. Fix:
 
@@ -149,20 +153,13 @@ being set everywhere else, this is why. Fix:
    **remote-machine-scoped** settings. Despite the UI calling this scope
    "Remote [SSH: hostname]" (which reads as client-side) the file is
    actually **on the VM**, at `~/.vscode-server/data/Machine/settings.json`
-   -- confirmed live. `provision-agent-vm.sh` step 8c writes this file
+   -- confirmed live. `provision-agent-vm.sh` step 8b writes this file
    automatically; only step 1's toggle needs doing by hand.
 3. Reload window (kills and respawns the extension's claude processes with
    the corrected flag).
 
-Plain `ssh`/terminal sessions don't have this problem the same way, but
-`permissions.defaultMode` in settings.json was found unreliable for
-*interactive* sessions there too (confirmed live: correct at both scopes,
-VM restarted fresh 3x, still prompted -- works fine for non-interactive `-p`
-invocations, not interactive ones). `provision-agent-vm.sh` step 8b installs
-a `~/.local/bin/claude` wrapper (ahead of `/usr/bin/claude` in PATH) that
-always launches with `--permission-mode bypassPermissions` explicitly, which
-is what actually holds for terminal/SSH use. That wrapper does not reach the
-VS Code extension's spawned process, hence steps 1-3 above.
+Terminal and SSH sessions take `permissions.defaultMode: bypassPermissions`
+from `~/.claude/settings.json`; Claude Code asks once to accept bypass mode.
 
 If you're using the remote-API feature, switch to the host remote before
 relying on it (the provisioning script already sets it as default, so this
@@ -173,7 +170,8 @@ incus remote switch host
 ```
 
 Baseline packages installed inside the VM are deliberately minimal (git,
-ssh, build tools, node, uv, gh, incus-client, tmux, Claude Code CLI). Add
+ssh, build tools, node, uv, gh, incus-client, tmux, and Claude Code from
+its native installer, which updates itself as the user). Add
 whatever your own workflow needs to `cloud-init.yaml` — a secrets tool, a
 database client, a specific language toolchain, etc.
 
@@ -196,7 +194,7 @@ show up for something that was working before.
 
 All off by default in `.env.example` — personal preferences, not defaults
 for anyone else reproducing this setup. Enable by setting to `1` in `.env`
-and re-running the script (steps 12-15 in `provision-agent-vm.sh`, each
+and re-running the script (steps 12-14 and 16 in `provision-agent-vm.sh`, each
 gated on its own flag and checked for existing state before acting).
 
 ### `INSTALL_TOKEN_SAVIOR` — [Mibayy/token-savior](https://github.com/Mibayy/token-savior)
@@ -278,7 +276,7 @@ re-enabling.
 
 ### `INSTALL_REMOTE_CONTROL`: sessions from claude.ai/code and the Claude app
 
-Step 15 installs a systemd user unit, `claude-rc.service`, that keeps
+Step 16 installs a systemd user unit, `claude-rc.service`, that keeps
 `claude remote-control` running in a detached tmux session (socket `rc`)
 in `$WORKSPACE_DEST`, with `bypassPermissions` and at most 3 concurrent
 sessions. Linger starts it at boot without a login; systemd restarts it
@@ -287,11 +285,9 @@ if it exits.
 - **Use**: open [claude.ai/code](https://claude.ai/code) or the Claude app
   (Code), pick a session named after the VM's hostname or start a new one.
   Sessions keep running when you close the browser or app.
-- **First start**: run `claude` once in `$WORKSPACE_DEST` and accept the
-  workspace trust dialog; until then the server exits with `Workspace not
-  trusted` and systemd retries every 30 seconds. Then attach with
-  `tmux -L rc attach -t rc`, accept the one-time Remote Control prompt and
-  detach with `Ctrl-b d`.
+- **First start**: attach with `tmux -L rc attach -t rc`, answer the
+  one-time prompts (workspace trust, Remote Control) and detach with
+  `Ctrl-b d`.
 - **Manage**: `systemctl --user status|restart|stop claude-rc` inside the VM.
 - **Login**: needs a claude.ai login in the VM (`claude`, then `/login`).
   API keys and `claude setup-token` tokens cannot start Remote Control.
@@ -321,6 +317,7 @@ run unattended.
 | `cloud-init.yaml` | In-guest first-boot: baseline packages (git, node, uv, gh, incus-client, tmux), SSH server, sudo group. Edit to add your own extras. |
 | `files/guard-hook.py` | The security hook — sudo/git-push/self-edit blocking. |
 | `files/claude-settings.json` | Wires the hook into Claude Code's `PreToolUse` events inside the VM. |
+| `files/cache-sweep.sh`, `.service`, `.timer` | Daily user timer that deletes cache entries older than 7 days. |
 | `cleanup-host.sh` | **Run manually, only after verifying the VM works.** Strips agent tooling from the bare host. |
 
 ## Verifying it worked

@@ -1,0 +1,6 @@
+[Unit]
+Description=Delete cache entries older than 7 days
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -l %h/.local/bin/cache-sweep

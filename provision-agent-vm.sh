@@ -140,38 +140,12 @@ incus file push "$SCRIPT_DIR/files/claude-settings.json" "$VM_NAME/home/$GUEST_U
 incus exec "$VM_NAME" -- chmod 755 "/home/$GUEST_USER/.claude/guard/hook.py"
 incus exec "$VM_NAME" -- chown -R "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.claude"
 
-# ---- 8b. permanent bypassPermissions wrapper (idempotent) ----------------
-# permissions.defaultMode in settings.json (set above) is unreliable for
-# *interactive* sessions -- confirmed live: correct at both user and
-# project scope, VM restarted fresh 3x, still prompted. Works fine for
-# non-interactive -p invocations, not interactive ones. The CLI flag
-# --permission-mode bypassPermissions is what actually holds (confirmed
-# live originally). A PATH-shadowing wrapper in ~/.local/bin (ahead of
-# /usr/bin in PATH) applies it regardless of how claude gets launched --
-# interactive shell, VS Code spawning it, anything doing a PATH lookup --
-# unlike a .bashrc alias, which only covers interactive shell invocations.
-if incus exec "$VM_NAME" -- test -f "/home/$GUEST_USER/.local/bin/claude" 2>/dev/null; then
-  echo "-- bypassPermissions wrapper already present, skipping --"
-else
-  echo "-- installing PATH-shadowing wrapper for permanent bypassPermissions --"
-  WRAPPER_TMP="$(mktemp)"
-  {
-    echo '#!/bin/bash'
-    echo 'exec /usr/bin/claude --permission-mode bypassPermissions "$@"'
-  } > "$WRAPPER_TMP"
-  incus exec "$VM_NAME" -- mkdir -p "/home/$GUEST_USER/.local/bin"
-  incus file push "$WRAPPER_TMP" "$VM_NAME/home/$GUEST_USER/.local/bin/claude"
-  incus exec "$VM_NAME" -- chmod +x "/home/$GUEST_USER/.local/bin/claude"
-  incus exec "$VM_NAME" -- chown "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.local/bin/claude"
-  rm -f "$WRAPPER_TMP"
-fi
-
-# ---- 8c. VS Code extension bypassPermissions (idempotent) ----------------
+# ---- 8b. VS Code extension bypassPermissions (idempotent) ----------------
 # The Claude Code VS Code extension spawns its own bundled binary directly
 # (~/.vscode-server/extensions/anthropic.claude-code-*/resources/native-
 # binary/claude, confirmed live via ps aux) and hardcodes
-# --permission-mode acceptEdits as a launch arg -- beats settings.json and
-# the PATH wrapper above entirely, since it never goes through PATH.
+# --permission-mode acceptEdits as a launch arg -- beats settings.json
+# entirely.
 # claudeCode.initialPermissionMode in VS Code's *remote-machine-scoped*
 # settings.json overrides that hardcoded flag. This is genuinely VM-side
 # (~/.vscode-server/data/Machine/settings.json), not client-side -- easy
@@ -424,17 +398,33 @@ if [ "${INSTALL_QMD_REMOTE:-0}" = "1" ]; then
   fi
 fi
 
-# ---- 15. optional Remote Control server (idempotent) ----------------------
+# ---- 15. daily cache sweep (idempotent) -----------------------------------
+# files/cache-sweep.sh under a daily systemd user timer: no regenerable
+# cache keeps anything older than 7 days (the script says how each cache
+# is handled; Docker volumes are never touched). Linger starts the user
+# manager at boot, so user timers and services run without a login.
+echo "-- installing the daily cache sweep (user timer) --"
+UNIT_DIR="/home/$GUEST_USER/.config/systemd/user"
+incus exec "$VM_NAME" -- mkdir -p "$UNIT_DIR" "/home/$GUEST_USER/.local/bin"
+incus file push "$SCRIPT_DIR/files/cache-sweep.sh" "$VM_NAME/home/$GUEST_USER/.local/bin/cache-sweep"
+incus file push "$SCRIPT_DIR/files/cache-sweep.service" "$VM_NAME$UNIT_DIR/cache-sweep.service"
+incus file push "$SCRIPT_DIR/files/cache-sweep.timer" "$VM_NAME$UNIT_DIR/cache-sweep.timer"
+incus exec "$VM_NAME" -- chmod 755 "/home/$GUEST_USER/.local/bin/cache-sweep"
+incus exec "$VM_NAME" -- chown -R "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.config/systemd" "/home/$GUEST_USER/.local/bin"
+incus exec "$VM_NAME" -- loginctl enable-linger "$GUEST_USER"
+GUEST_UID="$(incus exec "$VM_NAME" -- id -u "$GUEST_USER")"
+incus exec "$VM_NAME" -- systemctl start "user@$GUEST_UID.service"
+incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" daemon-reload
+incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" enable --now cache-sweep.timer
+
+# ---- 16. optional Remote Control server (idempotent) ----------------------
 # A systemd user unit keeps `claude remote-control` running in a detached
-# tmux session on its own socket (`rc`), restarting it if it exits; linger
-# starts the user manager at boot without a login. It calls /usr/bin/claude
-# directly: remote-control refuses global flags placed before the
-# subcommand, which is what the step 8b wrapper does, so the server takes
-# its own --permission-mode. Capacity 3: more parallel agents have hung
-# the virtiofs share.
+# tmux session on its own socket (`rc`), restarting it if it exits. The
+# server takes its own --permission-mode: remote-control refuses global
+# flags placed before the subcommand. Capacity 3: more parallel agents
+# have hung the virtiofs share.
 if [ "${INSTALL_REMOTE_CONTROL:-0}" = "1" ]; then
   echo "-- installing the claude-rc user service (Remote Control in tmux) --"
-  RC_UNIT_DIR="/home/$GUEST_USER/.config/systemd/user"
   RC_UNIT_TMP="$(mktemp)"
   cat > "$RC_UNIT_TMP" <<EOF
 [Unit]
@@ -443,7 +433,7 @@ Description=Claude Code Remote Control server (attach: tmux -L rc attach -t rc)
 [Service]
 Type=forking
 ExecStartPre=/bin/sh -c 'until mountpoint -q $WORKSPACE_DEST; do sleep 2; done'
-ExecStart=/usr/bin/tmux -L rc new-session -d -s rc -c $WORKSPACE_DEST /bin/bash -lc 'exec /usr/bin/claude remote-control --permission-mode bypassPermissions --capacity 3'
+ExecStart=/usr/bin/tmux -L rc new-session -d -s rc -c $WORKSPACE_DEST /bin/bash -lc 'exec %h/.local/bin/claude remote-control --permission-mode bypassPermissions --capacity 3'
 ExecStop=/usr/bin/tmux -L rc kill-server
 Restart=always
 RestartSec=30
@@ -452,19 +442,14 @@ TimeoutStartSec=300
 [Install]
 WantedBy=default.target
 EOF
-  incus exec "$VM_NAME" -- mkdir -p "$RC_UNIT_DIR"
-  incus file push "$RC_UNIT_TMP" "$VM_NAME$RC_UNIT_DIR/claude-rc.service"
-  incus exec "$VM_NAME" -- chown -R "$GUEST_USER:$GUEST_USER" "/home/$GUEST_USER/.config/systemd"
+  incus file push "$RC_UNIT_TMP" "$VM_NAME$UNIT_DIR/claude-rc.service"
+  incus exec "$VM_NAME" -- chown "$GUEST_USER:$GUEST_USER" "$UNIT_DIR/claude-rc.service"
   rm -f "$RC_UNIT_TMP"
-  incus exec "$VM_NAME" -- loginctl enable-linger "$GUEST_USER"
-  GUEST_UID="$(incus exec "$VM_NAME" -- id -u "$GUEST_USER")"
-  incus exec "$VM_NAME" -- systemctl start "user@$GUEST_UID.service"
   incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" daemon-reload
   incus exec "$VM_NAME" -- systemctl --user -M "$GUEST_USER@" enable --now claude-rc.service
-  echo "   First start only, inside the VM: run 'claude' once in $WORKSPACE_DEST and"
-  echo "   accept the workspace trust dialog, then attach with"
-  echo "   'tmux -L rc attach -t rc', accept the Remote Control prompt and detach"
-  echo "   with Ctrl-b d."
+  echo "   First start only, inside the VM: attach with 'tmux -L rc attach -t rc',"
+  echo "   answer the one-time prompts (workspace trust, Remote Control) and"
+  echo "   detach with Ctrl-b d."
 fi
 
 echo
